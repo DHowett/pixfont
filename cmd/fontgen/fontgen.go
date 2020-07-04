@@ -19,11 +19,18 @@ import (
 	"flag"
 	"fmt"
 	"go/format"
+	"image"
+	"os"
+	"sort"
+
+	"github.com/pbnjay/pixfont/cmd/fontgen/internal/parser"
+	pimg "github.com/pbnjay/pixfont/cmd/fontgen/internal/parser/image"
+	ptext "github.com/pbnjay/pixfont/cmd/fontgen/internal/parser/text"
+
+	// used by the image parser
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
-	"os"
-	"sort"
 
 	"github.com/pbnjay/pixfont"
 )
@@ -41,19 +48,19 @@ var (
 	outName  = flag.String("o", "", "package name to create (becomes <myfont>.go)")
 )
 
-// packFont takes a mostly textual representation of a pixel font and
-// packs it into a tight uint32 representation, returning that representation
-// plus a "mapping" from character code to encoded position.
-func packFont(w, h int, d map[rune]map[int]string) ([]uint32, map[rune]uint16) {
+// packFont packs a font (where each glyph is stored in its own uint32 matrix)
+// and returns a packed binary representation (with multiple glyphs per uint32)
+// plus a location mapping
+func packFont(font *parser.Font) ([]uint32, map[rune]uint16) {
 	cm := make(map[rune]uint16)
 
-	// Sort the glyph list so the representation is stable across different invocations
-	// of fontgen.
-	chs := make([]int, 0, len(d))
-	for ch, _ := range d {
+	chs := make([]int, 0, len(font.Glyphs))
+	for ch, _ := range font.Glyphs {
 		chs = append(chs, int(ch))
 	}
 	sort.IntSlice(chs).Sort()
+
+	w, h := font.Width, font.Height
 
 	// convert from simple character encoding to packed bitfield
 	// NB fonts should be at most 32 pixels wide to fit in the uint32
@@ -90,43 +97,30 @@ func packFont(w, h int, d map[rune]map[int]string) ([]uint32, map[rune]uint16) {
 	chPerU32 := 4 / u8PerCh       // we can fit 4, 2 or 1 glyphs per u32
 	spacing := 4 / chPerU32       // we must skip 1, 2, or 4 8-bit units between each glyph start
 
-	costPerLine := (len(d) + chPerU32 - 1) / chPerU32 // #of whole u32 per horizontal line in font
-	costTotal := h * costPerLine                      // #of whole u32s required for the whole font
+	costPerLine := (len(chs) + chPerU32 - 1) / chPerU32 // #of whole u32 per horizontal line in font
+	costTotal := h * costPerLine                        // #of whole u32s required for the whole font
 
 	encoded := make([]uint32, costTotal)
 
 	// i8 tracks the number of 8-bit units we've skipped
 	var i8 int
 	for _, c := range chs {
-		matrix := d[rune(c)]
+		matrix := font.Glyphs[rune(c)]
 
 		i32 := (i8 >> 2) * h // i32 is the index into encoded for the u32 for this char
 		dist := i8 & 0b11    // how many u8 units into the u32 we're offset
 		cm[rune(c)] = uint16((i32 << 2) | dist)
 
-		for y := 0; y < h; y++ {
-			line := encoded[i32+y]
-			var b uint32 = 1 << uint(8*dist)
-
-			if ld, hasLine := matrix[y]; hasLine {
-				for x := 0; x < w; x++ {
-					if len(ld) > x && ld[x] == 'X' {
-						line |= b
-					}
-					b <<= 1
-				}
-			}
-
-			encoded[i32+y] = line
+		for y, line := range matrix {
+			encoded[i32+y] |= (line << (8 * dist))
 		}
 
 		i8 += spacing
 	}
-
 	return encoded, cm
 }
 
-func generatePixFont(name string, w, h int, v bool, d map[rune]map[int]string) {
+func generatePixFont(name string, v bool, font *parser.Font) {
 	template := `
 		package %s
 
@@ -142,9 +136,9 @@ func generatePixFont(name string, w, h int, v bool, d map[rune]map[int]string) {
 		}
 	`
 
-	encoded, cm := packFont(w, h, d)
+	encoded, cm := packFont(font)
 
-	fnt := pixfont.NewPixFont(uint8(w), uint8(h), cm, encoded)
+	fnt := pixfont.NewPixFont(uint8(font.Width), uint8(font.Height), cm, encoded)
 	fnt.SetVariableWidth(v)
 
 	f, err := os.OpenFile(name+".go", os.O_CREATE|os.O_RDWR, 0644)
@@ -159,31 +153,92 @@ func generatePixFont(name string, w, h int, v bool, d map[rune]map[int]string) {
 	fmt.Fprintln(f, sd.PrefixString("// "))
 
 	// create the code from the template and go fmt it
-	code := fmt.Sprintf(template, name, cm, encoded, w, h, v)
+	code := fmt.Sprintf(template, name, cm, encoded, font.Width, font.Height, v)
 	bcode, _ := format.Source([]byte(code))
 	fmt.Fprintln(f, string(bcode))
 
 	f.Close()
 }
 
+func bitsToString(b uint32, w int) string {
+	s := ""
+	for i := 0; i < w; i++ {
+		if (b & 1) == 1 {
+			s += "X"
+		} else {
+			s += " "
+		}
+		b >>= 1
+	}
+	return s
+}
+
+func dumpFont(font *parser.Font) {
+	chs := make([]int, 0, len(font.Glyphs))
+	for ch, _ := range font.Glyphs {
+		chs = append(chs, int(ch))
+	}
+	sort.IntSlice(chs).Sort()
+
+	for _, ch := range chs {
+		for _, line := range font.Glyphs[rune(ch)] {
+			fmt.Printf("%c  [%s]\n", rune(ch), bitsToString(line, font.Width))
+		}
+	}
+}
+
 func main() {
 	flag.Parse()
 
-	allLetters := make(map[rune]map[int]string)
-	maxWidth := 0
-
+	var filename string
+	var p parser.Parser
 	if *imageName != "" {
-		allLetters, maxWidth = processImage(*imageName)
+		filename = *imageName
+		offset := image.Point{}
+		size := image.Point{}
+		if startX != nil {
+			offset.X = *startX
+		}
+		if startY != nil {
+			offset.Y = *startY
+		}
+		if width != nil {
+			size.X = *width
+		}
+		if height != nil {
+			size.Y = *height
+		}
+		imageParser := pimg.NewParser(*alphabet, offset, size)
+		p = imageParser
 	} else if *textName != "" {
-		allLetters, maxWidth = processText(*textName)
-	} else {
+		filename = *textName
+		p = ptext.NewParser()
+	}
+
+	if p == nil {
 		fmt.Fprintln(os.Stderr, "-img or -txt should be provided")
 		flag.Usage()
 		return
 	}
 
+	f, err := os.Open(filename)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "failed to open file:", err)
+		os.Exit(1)
+	}
+	defer f.Close()
+
+	font, err := p.Decode(f)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error parsing file:", err)
+		os.Exit(1)
+	}
+
 	if *outName != "" {
-		generatePixFont(*outName, maxWidth, *height, *varWidth, allLetters)
+		generatePixFont(*outName, *varWidth, font)
 		fmt.Fprintln(os.Stderr, "Created package file:", *outName+".go")
+	} else {
+		// dump a text representation of the font to stdout
+		dumpFont(font)
 	}
 }
