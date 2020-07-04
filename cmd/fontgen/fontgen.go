@@ -24,6 +24,7 @@ import (
 	"sort"
 
 	"github.com/pbnjay/pixfont/cmd/fontgen/internal/parser"
+	pbdf "github.com/pbnjay/pixfont/cmd/fontgen/internal/parser/bdf"
 	pimg "github.com/pbnjay/pixfont/cmd/fontgen/internal/parser/image"
 	ptext "github.com/pbnjay/pixfont/cmd/fontgen/internal/parser/text"
 
@@ -44,6 +45,7 @@ var (
 	alphabet  = flag.String("a", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789", "alphabet to extract")
 	varWidth  = flag.Bool("v", false, "produce variable width font")
 
+	bdfName  = flag.String("bdf", "", "bdf file to extract pixel font from")
 	textName = flag.String("txt", "", "text file to extract pixel font from")
 	outName  = flag.String("o", "", "package name to create (becomes <myfont>.go)")
 )
@@ -213,10 +215,13 @@ func main() {
 	} else if *textName != "" {
 		filename = *textName
 		p = ptext.NewParser()
+	} else if *bdfName != "" {
+		filename = *bdfName
+		p = pbdf.NewParser()
 	}
 
 	if p == nil {
-		fmt.Fprintln(os.Stderr, "-img or -txt should be provided")
+		fmt.Fprintln(os.Stderr, "-img, -bdf -txt should be provided")
 		flag.Usage()
 		return
 	}
