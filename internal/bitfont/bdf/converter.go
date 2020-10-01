@@ -4,12 +4,10 @@ import (
 	"io"
 	"math/bits"
 
-	"github.com/pbnjay/pixfont/cmd/fontgen/internal/parser"
+	"github.com/pbnjay/pixfont/internal/bitfont"
 )
 
-type bdfParser struct{}
-
-func (p *bdfParser) Decode(r io.Reader) (*parser.Font, error) {
+func Decode(r io.Reader) (*bitfont.Font, error) {
 	bf, err := OpenBDF(r)
 	if err != nil {
 		return nil, err
@@ -17,12 +15,12 @@ func (p *bdfParser) Decode(r io.Reader) (*parser.Font, error) {
 
 	// OpenBDF has already handled the font bounding box
 	// and all that matters is the glyph's bbox
-	glyphs := make(map[rune]parser.Matrix, len(bf.Glyphs))
+	glyphs := make(map[rune]bitfont.Glyph, len(bf.Glyphs))
 	width, height := -1, -1
 	for _, bg := range bf.Glyphs {
 		xoff, yoff := bg.BoundingBox[2], bg.BoundingBox[3]
 		h := len(bg.Bitmap) + yoff
-		matrix := make(parser.Matrix, h)
+		matrix := make([]uint32, h)
 		for i, b := range bg.Bitmap {
 			// bitmap occupies the top WIDTH bits of the bottom nearest increment of 8
 			o := 32 - ((((bg.BoundingBox[0] - 1) / 8) + 1) * 8)
@@ -41,16 +39,12 @@ func (p *bdfParser) Decode(r io.Reader) (*parser.Font, error) {
 		if height < hh {
 			height = hh
 		}
-		glyphs[bg.Encoding] = matrix
+		glyphs[bg.Encoding] = bitfont.Glyph{Mask: matrix}
 	}
 
-	return &parser.Font{
+	return &bitfont.Font{
 		Width:  width,
 		Height: height,
 		Glyphs: glyphs,
 	}, nil
-}
-
-func NewParser() parser.Parser {
-	return &bdfParser{}
 }
