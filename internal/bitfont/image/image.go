@@ -6,34 +6,38 @@ import (
 	"io"
 	"unicode/utf8"
 
-	"github.com/pbnjay/pixfont/cmd/fontgen/internal/parser"
+	"github.com/pbnjay/pixfont/internal/bitfont"
 )
 
-type imageParser struct {
-	alphabet string
-	// window is an optional subregion of the image to parse
-	// if it's empty, we ignore it
-	offset image.Point
-	size   image.Point
+type Options struct {
+	Offset image.Point
+	Size   image.Point
 }
 
-func (p *imageParser) Decode(r io.Reader) (*parser.Font, error) {
+func Decode(r io.Reader, alphabet string, options *Options) (*bitfont.Font, error) {
 	img, _, err := image.Decode(r)
 	if err != nil {
 		return nil, err
 	}
 
+	var offset image.Point
+	var size image.Point
+	if options != nil {
+		offset = options.Offset
+		size = options.Size
+	}
+
 	bounds := img.Bounds()
-	bounds.Min = p.offset
-	if p.size.X != 0 {
-		bounds.Max.X = bounds.Min.X + p.size.X
+	bounds.Min = offset
+	if size.X != 0 {
+		bounds.Max.X = bounds.Min.X + size.X
 	}
 
-	if p.size.Y != 0 {
-		bounds.Max.Y = bounds.Min.Y + p.size.Y
+	if size.Y != 0 {
+		bounds.Max.Y = bounds.Min.Y + size.Y
 	}
 
-	glyphs := make(map[rune]parser.Matrix)
+	glyphs := make(map[rune]bitfont.Glyph)
 	maxWidth := 0
 
 	// generate a greyscale histogram of the image
@@ -66,9 +70,9 @@ func (p *imageParser) Decode(r io.Reader) (*parser.Font, error) {
 	// scan across the image in the crop region, saving pixels as you go.
 	// if at any point we see an "empty" column of pixels, we assume it
 	// is a character boundary and move to the next alphabet letter.
-	curAlpha := p.alphabet
+	curAlpha := alphabet
 	curWidth := 0
-	curMatrix := make(parser.Matrix, 0, 16)
+	curMatrix := make([]uint32, 0, 16)
 	for x := bounds.Min.X; x < bounds.Max.X; x++ {
 		curWidth++
 		isEmpty := true
@@ -95,7 +99,7 @@ func (p *imageParser) Decode(r io.Reader) (*parser.Font, error) {
 						curMatrix[yy] >>= 32 - curWidth - 1
 					}
 					r, nbytes := utf8.DecodeRuneInString(curAlpha)
-					glyphs[r] = curMatrix
+					glyphs[r] = bitfont.Glyph{Mask: curMatrix}
 					curAlpha = curAlpha[nbytes:]
 				}
 				if curWidth > maxWidth {
@@ -103,7 +107,7 @@ func (p *imageParser) Decode(r io.Reader) (*parser.Font, error) {
 				}
 			}
 			curWidth = 0
-			curMatrix = make(parser.Matrix, 0, 16)
+			curMatrix = make([]uint32, 0, 16)
 		}
 	}
 
@@ -117,23 +121,15 @@ func (p *imageParser) Decode(r io.Reader) (*parser.Font, error) {
 			curMatrix[yy] >>= 32 - curWidth
 		}
 		r, _ := utf8.DecodeRuneInString(curAlpha)
-		glyphs[r] = curMatrix
+		glyphs[r] = bitfont.Glyph{Mask: curMatrix}
 		if curWidth > maxWidth {
 			maxWidth = curWidth
 		}
 	}
 
-	return &parser.Font{
+	return &bitfont.Font{
 		Width:  maxWidth,
 		Height: bounds.Dy(),
 		Glyphs: glyphs,
 	}, nil
-}
-
-func NewParser(alphabet string, offset image.Point, size image.Point) parser.Parser {
-	return &imageParser{
-		alphabet: alphabet,
-		offset:   offset,
-		size:     size,
-	}
 }

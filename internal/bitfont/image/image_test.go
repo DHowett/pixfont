@@ -2,18 +2,18 @@ package image
 
 import (
 	"image"
+	_ "image/png"
 	"os"
 	"path/filepath"
 	"testing"
-	_ "image/png"
 
-	"github.com/pbnjay/pixfont/cmd/fontgen/internal/parser"
+	"github.com/pbnjay/pixfont/internal/bitfont"
 )
 
-func assertGlyphMatrix(t *testing.T, ch rune, m parser.Matrix, values ...uint32) {
+func assertGlyphMask(t *testing.T, ch rune, g bitfont.Glyph, values ...uint32) {
 	for i, v := range values {
-		if m[i] != v {
-			t.Errorf("character %c row %d: expected %032b got %032b", ch, i, v, m[i])
+		if g.Mask[i] != v {
+			t.Errorf("character %c row %d: expected %032b got %032b", ch, i, v, g.Mask[i])
 		}
 	}
 }
@@ -30,10 +30,7 @@ func TestParseNoOffset(t *testing.T) {
 	f := testOpenFile(t, "abc.png")
 	defer f.Close()
 
-	p := &imageParser{
-		alphabet: "ABC",
-	}
-	font, err := p.Decode(f)
+	font, err := Decode(f, "ABC", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,21 +47,19 @@ func TestParseNoOffset(t *testing.T) {
 		t.Error("unexpected glyph count", len(font.Glyphs))
 	}
 
-	assertGlyphMatrix(t, 'A', font.Glyphs['A'], 0b010, 0b101, 0b111, 0b101, 0b101)
-	assertGlyphMatrix(t, 'B', font.Glyphs['B'], 0b011, 0b101, 0b011, 0b101, 0b011)
-	assertGlyphMatrix(t, 'C', font.Glyphs['C'], 0b0110, 0b1001, 0b0001, 0b1001, 0b0110)
+	assertGlyphMask(t, 'A', font.Glyphs['A'], 0b010, 0b101, 0b111, 0b101, 0b101)
+	assertGlyphMask(t, 'B', font.Glyphs['B'], 0b011, 0b101, 0b011, 0b101, 0b011)
+	assertGlyphMask(t, 'C', font.Glyphs['C'], 0b0110, 0b1001, 0b0001, 0b1001, 0b0110)
 }
 
 func TestParseOffset(t *testing.T) {
 	f := testOpenFile(t, "abc.png")
 	defer f.Close()
 
-	p := &imageParser{
-		alphabet: "BC",
-		// I only want BC
-		offset: image.Point{4, 0},
-	}
-	font, err := p.Decode(f)
+	font, err := Decode(f, "BC", &Options{
+		// I only want BC so crop out A
+		Offset: image.Point{4, 0},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,21 +76,19 @@ func TestParseOffset(t *testing.T) {
 		t.Error("unexpected glyph count", len(font.Glyphs))
 	}
 
-	assertGlyphMatrix(t, 'B', font.Glyphs['B'], 0b011, 0b101, 0b011, 0b101, 0b011)
-	assertGlyphMatrix(t, 'C', font.Glyphs['C'], 0b0110, 0b1001, 0b0001, 0b1001, 0b0110)
+	assertGlyphMask(t, 'B', font.Glyphs['B'], 0b011, 0b101, 0b011, 0b101, 0b011)
+	assertGlyphMask(t, 'C', font.Glyphs['C'], 0b0110, 0b1001, 0b0001, 0b1001, 0b0110)
 }
 
 func TestParseWindow(t *testing.T) {
 	f := testOpenFile(t, "abc.png")
 	defer f.Close()
 
-	p := &imageParser{
-		alphabet: "BC",
-		// I only want B
-		offset: image.Point{4, 0},
-		size:   image.Point{3, 0}, // y=0 == y=max
-	}
-	font, err := p.Decode(f)
+	font, err := Decode(f, "BC", &Options{
+		// we only want B, so crop out A and C
+		Offset: image.Point{4, 0},
+		Size:   image.Point{3, 0},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,5 +105,5 @@ func TestParseWindow(t *testing.T) {
 		t.Error("unexpected glyph count", len(font.Glyphs))
 	}
 
-	assertGlyphMatrix(t, 'B', font.Glyphs['B'], 0b011, 0b101, 0b011, 0b101, 0b011)
+	assertGlyphMask(t, 'B', font.Glyphs['B'], 0b011, 0b101, 0b011, 0b101, 0b011)
 }
