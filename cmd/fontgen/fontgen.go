@@ -16,6 +16,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"go/format"
@@ -23,10 +24,10 @@ import (
 	"os"
 	"sort"
 
-	"github.com/pbnjay/pixfont/cmd/fontgen/internal/parser"
-	pbdf "github.com/pbnjay/pixfont/cmd/fontgen/internal/parser/bdf"
-	pimg "github.com/pbnjay/pixfont/cmd/fontgen/internal/parser/image"
-	ptext "github.com/pbnjay/pixfont/cmd/fontgen/internal/parser/text"
+	"github.com/pbnjay/pixfont/internal/bitfont"
+	pbdf "github.com/pbnjay/pixfont/internal/bitfont/bdf"
+	pimg "github.com/pbnjay/pixfont/internal/bitfont/image"
+	ptext "github.com/pbnjay/pixfont/internal/bitfont/text"
 
 	// used by the image parser
 	_ "image/gif"
@@ -53,7 +54,7 @@ var (
 // packFont packs a font (where each glyph is stored in its own uint32 matrix)
 // and returns a packed binary representation (with multiple glyphs per uint32)
 // plus a location mapping
-func packFont(font *parser.Font) ([]uint32, map[rune]uint16) {
+func packFont(font *bitfont.Font) ([]uint32, map[rune]uint16) {
 	cm := make(map[rune]uint16)
 
 	chs := make([]int, 0, len(font.Glyphs))
@@ -107,13 +108,13 @@ func packFont(font *parser.Font) ([]uint32, map[rune]uint16) {
 	// i8 tracks the number of 8-bit units we've skipped
 	var i8 int
 	for _, c := range chs {
-		matrix := font.Glyphs[rune(c)]
+		glyph := font.Glyphs[rune(c)]
 
 		i32 := (i8 >> 2) * h // i32 is the index into encoded for the u32 for this char
 		dist := i8 & 0b11    // how many u8 units into the u32 we're offset
 		cm[rune(c)] = uint16((i32 << 2) | dist)
 
-		for y, line := range matrix {
+		for y, line := range glyph.Mask {
 			encoded[i32+y] |= (line << (8 * dist))
 		}
 
@@ -122,7 +123,7 @@ func packFont(font *parser.Font) ([]uint32, map[rune]uint16) {
 	return encoded, cm
 }
 
-func generatePixFont(name string, v bool, font *parser.Font) {
+func generatePixFont(name string, v bool, font *bitfont.Font) {
 	template := `
 		package %s
 
@@ -175,7 +176,7 @@ func bitsToString(b uint32, w int) string {
 	return s
 }
 
-func dumpFont(font *parser.Font) {
+func dumpFont(font *bitfont.Font) {
 	chs := make([]int, 0, len(font.Glyphs))
 	for ch, _ := range font.Glyphs {
 		chs = append(chs, int(ch))
@@ -183,21 +184,31 @@ func dumpFont(font *parser.Font) {
 	sort.IntSlice(chs).Sort()
 
 	for _, ch := range chs {
-		for _, line := range font.Glyphs[rune(ch)] {
+		glyph := font.Glyphs[rune(ch)]
+		for _, line := range glyph.Mask {
 			fmt.Printf("%c  [%s]\n", rune(ch), bitsToString(line, font.Width))
 		}
 	}
 }
 
+type Format int
+
+const (
+	FormatUnknown Format = iota
+	FormatText
+	FormatImage
+	FormatBDF
+)
+
 func main() {
 	flag.Parse()
 
 	var filename string
-	var p parser.Parser
+	format := FormatUnknown
+	var offset, size image.Point
 	if *imageName != "" {
 		filename = *imageName
-		offset := image.Point{}
-		size := image.Point{}
+		format = FormatImage
 		if startX != nil {
 			offset.X = *startX
 		}
@@ -210,18 +221,16 @@ func main() {
 		if height != nil {
 			size.Y = *height
 		}
-		imageParser := pimg.NewParser(*alphabet, offset, size)
-		p = imageParser
 	} else if *textName != "" {
 		filename = *textName
-		p = ptext.NewParser()
+		format = FormatText
 	} else if *bdfName != "" {
 		filename = *bdfName
-		p = pbdf.NewParser()
+		format = FormatBDF
 	}
 
-	if p == nil {
-		fmt.Fprintln(os.Stderr, "-img, -bdf -txt should be provided")
+	if filename == "" || format == FormatUnknown {
+		fmt.Fprintln(os.Stderr, "-img, -bdf, or -txt should be provided")
 		flag.Usage()
 		return
 	}
@@ -233,7 +242,21 @@ func main() {
 	}
 	defer f.Close()
 
-	font, err := p.Decode(f)
+	var font *bitfont.Font
+	switch format {
+	case FormatText:
+		font, err = ptext.Decode(f)
+	case FormatBDF:
+		font, err = pbdf.Decode(f)
+	case FormatImage:
+		font, err = pimg.Decode(f, *alphabet, &pimg.Options{
+			Offset: offset,
+			Size:   size,
+		})
+	default:
+		err = errors.New("unknown format -- still!")
+	}
+
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error parsing file:", err)
 		os.Exit(1)
